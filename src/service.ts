@@ -10,6 +10,8 @@
  *   GET /api/reddit/*  (Reddit Intelligence)
  *   GET /api/instagram/* (Instagram Intelligence + AI Vision)
  *   GET /api/linkedin/* (LinkedIn Enrichment)
+ *   GET /api/serp      (Google SERP Tracker)
+ *   GET /api/price     (E-Commerce Price & Stock Monitor)
  */
 
 import { Hono } from 'hono';
@@ -29,6 +31,7 @@ import {
 } from './scrapers/linkedin-enrichment';
 import { getProfile, getPosts, analyzeProfile, analyzeImages, auditProfile } from './scrapers/instagram-scraper';
 import { searchReddit, getSubreddit, getTrending, getComments } from './scrapers/reddit-scraper';
+import { scrapeProductPrice, monitorPrices } from './scrapers/price-monitor';
 
 export const serviceRouter = new Hono();
 
@@ -1484,5 +1487,76 @@ serviceRouter.get('/serp', async (c) => {
     });
   } catch (err: any) {
     return c.json({ error: 'SERP scrape failed', message: err?.message || String(err) }, 502);
+  }
+});
+
+// ─── E-COMMERCE PRICE & STOCK MONITOR ─────────────────
+
+const PRICE_PRICE_USDC = parseFloat(process.env.PRICE_PRICE_USDC || '0.005');
+const PRICE_DESCRIPTION = 'E-Commerce Price & Stock Monitor — scrape any product page for price, availability, brand, rating. Supports Amazon, eBay, Walmart, Etsy, Target, AliExpress + schema.org/Product JSON-LD.';
+const PRICE_OUTPUT_SCHEMA = {
+  input: {
+    url: 'string (required) — Product page URL to scrape',
+    urls: 'string (optional) — Comma-separated list of URLs for batch monitoring',
+  },
+  output: {
+    results: '[{ name, price, currency, originalPrice, stockStatus, image, url, store, brand, rating, reviewCount, checkedAt, onSale }]',
+    totalFound: 'number',
+  },
+};
+
+serviceRouter.get('/price', async (c) => {
+  const walletAddress = process.env.WALLET_ADDRESS;
+  if (!walletAddress) return c.json({ error: 'Wallet not configured' }, 500);
+
+  const payment = extractPayment(c);
+  if (!payment) {
+    return c.json(build402Response('/api/price', PRICE_DESCRIPTION, PRICE_PRICE_USDC, walletAddress, PRICE_OUTPUT_SCHEMA), 402);
+  }
+
+  const verification = await verifyPayment(payment, walletAddress, PRICE_PRICE_USDC);
+  if (!verification.valid) return c.json({ error: 'Payment verification failed', reason: verification.error }, 402);
+
+  const urlParam = c.req.query('url');
+  const urlsParam = c.req.query('urls');
+
+  if (!urlParam && !urlsParam) {
+    return c.json({
+      error: 'Missing required parameter',
+      hint: 'Provide ?url=https://example.com/product or ?urls=https://a.com/p1,https://b.com/p2',
+      example: '/api/price?url=https://www.amazon.com/dp/B0EXAMPLE',
+    }, 400);
+  }
+
+  try {
+    const proxy = getProxy();
+    const ip = await getProxyExitIp();
+
+    let result: any;
+
+    if (urlsParam) {
+      const urls = urlsParam.split(',').map(u => u.trim()).filter(Boolean);
+      if (urls.length === 0) {
+        return c.json({ error: 'urls parameter is empty', hint: 'Provide comma-separated URLs' }, 400);
+      }
+      if (urls.length > 10) {
+        return c.json({ error: 'Maximum 10 URLs per batch request', limit: 10 }, 400);
+      }
+      result = await monitorPrices(urls);
+    } else {
+      const product = await scrapeProductPrice(urlParam!);
+      result = { results: [product], totalFound: 1 };
+    }
+
+    c.header('X-Payment-Settled', 'true');
+    c.header('X-Payment-TxHash', payment.txHash);
+
+    return c.json({
+      ...result,
+      meta: { proxy: { ip, country: proxy.country, type: 'mobile' } },
+      payment: { txHash: payment.txHash, network: payment.network, amount: verification.amount, settled: true },
+    });
+  } catch (err: any) {
+    return c.json({ error: 'Price scrape failed', message: err?.message || String(err), hint: 'The product page may be blocking requests or require JavaScript rendering.' }, 502);
   }
 });
