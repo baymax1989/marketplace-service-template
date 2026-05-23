@@ -36,6 +36,8 @@ import { trackTravelPrices } from './scrapers/travel-price-tracker';
 import { aggregateRealEstate } from './scrapers/realestate-scraper';
 import { getSocialProfiles } from './scrapers/social-scraper';
 import { spyOnAds } from './scrapers/adspy-scraper';
+import { verifyAdPlacements } from './scrapers/adverify-scraper';
+import { monitorReputation } from './scrapers/review-monitor';
 
 export const serviceRouter = new Hono();
 
@@ -1763,4 +1765,39 @@ serviceRouter.get('/adspy', async (c) => {
   } catch (err: any) {
     return c.json({ error: 'Ad spy failed', message: err?.message || String(err) }, 502);
   }
+});
+
+// ─── AD VERIFICATION & BRAND SAFETY ──────────────────
+
+const ADVERIFY_PRICE_USDC = 0.005;
+serviceRouter.get('/adverify', async (c) => {
+  const wallet = process.env.WALLET_ADDRESS; if(!wallet) return c.json({error:'Wallet not configured'},500);
+  const p = extractPayment(c); if(!p) return c.json(build402Response('/api/adverify','Ad Verification & Brand Safety — check URLs for adult content, gambling, hate speech, malware, and competitor ads.',ADVERIFY_PRICE_USDC,wallet,{input:{urls:'string — comma-separated URLs',brand:'string (optional)',competitors:'string (optional)'}}),402);
+  const v = await verifyPayment(p,wallet,ADVERIFY_PRICE_USDC); if(!v.valid) return c.json({error:'Payment verification failed',reason:v.error},402);
+  const urls = (c.req.query('urls')||c.req.query('url')||'').split(',').map(u=>u.trim()).filter(Boolean);
+  if(!urls.length) return c.json({error:'Missing urls parameter'},400);
+  const competitors = (c.req.query('competitors')||'').split(',').map(u=>u.trim()).filter(Boolean);
+  try{
+    const proxy = getProxy(); const ip = await getProxyExitIp();
+    const result = await verifyAdPlacements(urls,undefined,competitors.length?competitors:undefined);
+    c.header('X-Payment-Settled','true'); c.header('X-Payment-TxHash',p.txHash);
+    return c.json({...result,meta:{proxy:{ip,country:proxy.country,type:'mobile'}},payment:{txHash:p.txHash,network:p.network,amount:v.amount,settled:true}});
+  }catch(err:any){return c.json({error:'Verification failed',message:err?.message||String(err)},502);}
+});
+
+// ─── REVIEW & REPUTATION MONITOR ─────────────────────
+
+const REVIEWMON_PRICE_USDC = 0.005;
+serviceRouter.get('/reputation', async (c) => {
+  const wallet = process.env.WALLET_ADDRESS; if(!wallet) return c.json({error:'Wallet not configured'},500);
+  const p = extractPayment(c); if(!p) return c.json(build402Response('/api/reputation','Review & Reputation Monitor — aggregate reviews from Trustpilot and Google. Sentiment analysis and rating distribution included.',REVIEWMON_PRICE_USDC,wallet,{input:{business:'string (required)',platforms:'trustpilot,google (optional)'}}),402);
+  const v = await verifyPayment(p,wallet,REVIEWMON_PRICE_USDC); if(!v.valid) return c.json({error:'Payment verification failed',reason:v.error},402);
+  const business = c.req.query('business'); if(!business) return c.json({error:'Missing business parameter'},400);
+  const plats = (c.req.query('platforms')||'').split(',').map(s=>s.trim()).filter(Boolean);
+  try{
+    const proxy = getProxy(); const ip = await getProxyExitIp();
+    const result = await monitorReputation(business,plats.length?plats:undefined);
+    c.header('X-Payment-Settled','true'); c.header('X-Payment-TxHash',p.txHash);
+    return c.json({...result,meta:{proxy:{ip,country:proxy.country,type:'mobile'}},payment:{txHash:p.txHash,network:p.network,amount:v.amount,settled:true}});
+  }catch(err:any){return c.json({error:'Monitor failed',message:err?.message||String(err)},502);}
 });
