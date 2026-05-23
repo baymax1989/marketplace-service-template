@@ -38,6 +38,7 @@ import { getSocialProfiles } from './scrapers/social-scraper';
 import { spyOnAds } from './scrapers/adspy-scraper';
 import { verifyAdPlacements } from './scrapers/adverify-scraper';
 import { monitorReputation } from './scrapers/review-monitor';
+import { aiSearch } from './scrapers/ai-search';
 
 export const serviceRouter = new Hono();
 
@@ -1800,4 +1801,22 @@ serviceRouter.get('/reputation', async (c) => {
     c.header('X-Payment-Settled','true'); c.header('X-Payment-TxHash',p.txHash);
     return c.json({...result,meta:{proxy:{ip,country:proxy.country,type:'mobile'}},payment:{txHash:p.txHash,network:p.network,amount:v.amount,settled:true}});
   }catch(err:any){return c.json({error:'Monitor failed',message:err?.message||String(err)},502);}
+});
+
+// ─── AI-POWERED SEARCH ($200 Wave 1) ──────────────────
+
+const AISEARCH_PRICE_USDC = 0.02;
+serviceRouter.get('/aisearch', async (c) => {
+  const wallet = process.env.WALLET_ADDRESS; if(!wallet) return c.json({error:'Wallet not configured'},500);
+  const p = extractPayment(c); if(!p) return c.json(build402Response('/api/aisearch','AI-Powered Search Summarizer — Google SERP + qwen3.7-max LLM analysis. Returns structured answers with cited sources.',AISEARCH_PRICE_USDC,wallet,{input:{q:'string (required)',deep:'boolean (optional)'},output:{answer:'string',sources:'[{title,url,snippet}]',followUpQuestions:'string[]',confidence:'high|medium|low',tokensUsed:'number'}}),402);
+  const v = await verifyPayment(p,wallet,AISEARCH_PRICE_USDC); if(!v.valid) return c.json({error:'Payment verification failed',reason:v.error},402);
+  const q = c.req.query('q') || c.req.query('query');
+  if(!q) return c.json({error:'Missing query parameter',example:'/api/aisearch?q=iPhone+16+vs+Samsung+S25+camera'},400);
+  const deep = c.req.query('deep') === 'true';
+  try{
+    const proxy = getProxy(); const ip = await getProxyExitIp();
+    const result = await aiSearch(q, deep, process.env.AI_SEARCH_API_KEY);
+    c.header('X-Payment-Settled','true'); c.header('X-Payment-TxHash',p.txHash);
+    return c.json({...result,meta:{proxy:{ip,country:proxy.country,type:'mobile'}},payment:{txHash:p.txHash,network:p.network,amount:v.amount,settled:true}});
+  }catch(err:any){return c.json({error:'AI search failed',message:err?.message||String(err)},502);}
 });
