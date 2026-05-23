@@ -32,6 +32,7 @@ import {
 import { getProfile, getPosts, analyzeProfile, analyzeImages, auditProfile } from './scrapers/instagram-scraper';
 import { searchReddit, getSubreddit, getTrending, getComments } from './scrapers/reddit-scraper';
 import { scrapeProductPrice, monitorPrices } from './scrapers/price-monitor';
+import { trackTravelPrices } from './scrapers/travel-price-tracker';
 
 export const serviceRouter = new Hono();
 
@@ -1558,5 +1559,86 @@ serviceRouter.get('/price', async (c) => {
     });
   } catch (err: any) {
     return c.json({ error: 'Price scrape failed', message: err?.message || String(err), hint: 'The product page may be blocking requests or require JavaScript rendering.' }, 502);
+  }
+});
+
+// ─── TRAVEL PRICE TRACKER ────────────────────────────
+
+const TRAVEL_PRICE_USDC = parseFloat(process.env.TRAVEL_PRICE_USDC || '0.005');
+const TRAVEL_DESCRIPTION = 'Travel Price Tracker API — compare flight, hotel, and package prices across Google Flights, Kayak, Skyscanner, Booking.com. Multi-provider aggregation with price range and cheapest-first sorting.';
+const TRAVEL_OUTPUT_SCHEMA = {
+  input: {
+    type: '"flight" | "hotel" | "package" (required)',
+    origin: 'string (flights) — departure city or airport code',
+    destination: 'string (required) — destination city, airport, or hotel name',
+    departDate: 'string (optional) — YYYY-MM-DD',
+    returnDate: 'string (optional) — YYYY-MM-DD',
+    travelers: 'number (optional) — default 1',
+    limit: 'number (optional) — max results, default 20',
+  },
+  output: {
+    results: '[{ provider, price, currency, origin, destination, departDate, returnDate, details, url, type, checkedAt }]',
+    cheapest: 'TravelPrice | null',
+    priceRange: '{ min, max }',
+    totalFound: 'number',
+  },
+};
+
+serviceRouter.get('/travel', async (c) => {
+  const walletAddress = process.env.WALLET_ADDRESS;
+  if (!walletAddress) return c.json({ error: 'Wallet not configured' }, 500);
+
+  const payment = extractPayment(c);
+  if (!payment) {
+    return c.json(build402Response('/api/travel', TRAVEL_DESCRIPTION, TRAVEL_PRICE_USDC, walletAddress, TRAVEL_OUTPUT_SCHEMA), 402);
+  }
+
+  const verification = await verifyPayment(payment, walletAddress, TRAVEL_PRICE_USDC);
+  if (!verification.valid) return c.json({ error: 'Payment verification failed', reason: verification.error }, 402);
+
+  const type = (c.req.query('type') || 'flight') as 'flight' | 'hotel' | 'package';
+  const origin = c.req.query('origin') || undefined;
+  const destination = c.req.query('destination');
+  const departDate = c.req.query('departDate') || c.req.query('depart') || undefined;
+  const returnDate = c.req.query('returnDate') || c.req.query('return') || undefined;
+  const travelers = parseInt(c.req.query('travelers') || '1');
+  const limit = Math.min(Math.max(parseInt(c.req.query('limit') || '20') || 20, 1), 50);
+
+  if (!destination) {
+    return c.json({
+      error: 'Missing required parameter: destination',
+      hint: 'Provide ?type=flight&origin=NYC&destination=LAX&departDate=2026-06-15',
+      example: '/api/travel?type=flight&origin=JFK&destination=LAX&departDate=2026-06-15&returnDate=2026-06-22',
+    }, 400);
+  }
+
+  if (type === 'flight' && !origin) {
+    return c.json({ error: 'Flight searches require origin parameter' }, 400);
+  }
+
+  try {
+    const proxy = getProxy();
+    const ip = await getProxyExitIp();
+
+    const result = await trackTravelPrices({
+      type,
+      origin,
+      destination,
+      departDate,
+      returnDate,
+      travelers,
+      limit,
+    });
+
+    c.header('X-Payment-Settled', 'true');
+    c.header('X-Payment-TxHash', payment.txHash);
+
+    return c.json({
+      ...result,
+      meta: { proxy: { ip, country: proxy.country, type: 'mobile' } },
+      payment: { txHash: payment.txHash, network: payment.network, amount: verification.amount, settled: true },
+    });
+  } catch (err: any) {
+    return c.json({ error: 'Travel price search failed', message: err?.message || String(err), hint: 'Travel sites may have blocked the request. Try again with a different query.' }, 502);
   }
 });
