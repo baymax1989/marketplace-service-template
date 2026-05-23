@@ -33,6 +33,9 @@ import { getProfile, getPosts, analyzeProfile, analyzeImages, auditProfile } fro
 import { searchReddit, getSubreddit, getTrending, getComments } from './scrapers/reddit-scraper';
 import { scrapeProductPrice, monitorPrices } from './scrapers/price-monitor';
 import { trackTravelPrices } from './scrapers/travel-price-tracker';
+import { aggregateRealEstate } from './scrapers/realestate-scraper';
+import { getSocialProfiles } from './scrapers/social-scraper';
+import { spyOnAds } from './scrapers/adspy-scraper';
 
 export const serviceRouter = new Hono();
 
@@ -1640,5 +1643,124 @@ serviceRouter.get('/travel', async (c) => {
     });
   } catch (err: any) {
     return c.json({ error: 'Travel price search failed', message: err?.message || String(err), hint: 'Travel sites may have blocked the request. Try again with a different query.' }, 502);
+  }
+});
+
+// ─── REAL ESTATE LISTING AGGREGATOR ───────────────────
+
+const REALESTATE_PRICE_USDC = parseFloat(process.env.REALESTATE_PRICE_USDC || '0.005');
+const REALESTATE_DESCRIPTION = 'Real Estate Listing Aggregator — search Zillow, Realtor.com, Redfin for property listings with price, beds/baths, sqft, and status. Price range analysis included.';
+
+serviceRouter.get('/realestate', async (c) => {
+  const walletAddress = process.env.WALLET_ADDRESS;
+  if (!walletAddress) return c.json({ error: 'Wallet not configured' }, 500);
+
+  const payment = extractPayment(c);
+  if (!payment) {
+    return c.json(build402Response('/api/realestate', REALESTATE_DESCRIPTION, REALESTATE_PRICE_USDC, walletAddress, {
+      input: { location: 'string (required)', type: '"sale" | "rent" (default: sale)', limit: 'number (default: 20)' },
+      output: { results: 'RealEstateListing[]', priceRange: '{ min, max, avg }' },
+    }), 402);
+  }
+
+  const verification = await verifyPayment(payment, walletAddress, REALESTATE_PRICE_USDC);
+  if (!verification.valid) return c.json({ error: 'Payment verification failed', reason: verification.error }, 402);
+
+  const location = c.req.query('location');
+  if (!location) return c.json({ error: 'Missing required parameter: location' }, 400);
+
+  const type = (c.req.query('type') || 'sale') as 'sale' | 'rent';
+  const limit = Math.min(Math.max(parseInt(c.req.query('limit') || '20') || 20, 1), 50);
+
+  try {
+    const proxy = getProxy();
+    const ip = await getProxyExitIp();
+    const result = await aggregateRealEstate(location, type, limit);
+
+    c.header('X-Payment-Settled', 'true');
+    c.header('X-Payment-TxHash', payment.txHash);
+    return c.json({ ...result, meta: { proxy: { ip, country: proxy.country, type: 'mobile' } }, payment: { txHash: payment.txHash, network: payment.network, amount: verification.amount, settled: true } });
+  } catch (err: any) {
+    return c.json({ error: 'Real estate search failed', message: err?.message || String(err) }, 502);
+  }
+});
+
+// ─── SOCIAL PROFILE INTELLIGENCE ──────────────────────
+
+const SOCIAL_PRICE_USDC = parseFloat(process.env.SOCIAL_PRICE_USDC || '0.005');
+const SOCIAL_DESCRIPTION = 'Social Profile Intelligence — aggregate public profiles from Twitter, Instagram, GitHub. Extract bio, followers, posts, verification status. Multi-platform lookup from a single username.';
+
+serviceRouter.get('/social', async (c) => {
+  const walletAddress = process.env.WALLET_ADDRESS;
+  if (!walletAddress) return c.json({ error: 'Wallet not configured' }, 500);
+
+  const payment = extractPayment(c);
+  if (!payment) {
+    return c.json(build402Response('/api/social', SOCIAL_DESCRIPTION, SOCIAL_PRICE_USDC, walletAddress, {
+      input: { username: 'string (required)', platforms: 'string (optional) — twitter,instagram,github (default: all)' },
+      output: { profiles: 'SocialProfile[]', totalPlatforms: 'number' },
+    }), 402);
+  }
+
+  const verification = await verifyPayment(payment, walletAddress, SOCIAL_PRICE_USDC);
+  if (!verification.valid) return c.json({ error: 'Payment verification failed', reason: verification.error }, 402);
+
+  const username = c.req.query('username');
+  if (!username) return c.json({ error: 'Missing required parameter: username' }, 400);
+
+  const platformsStr = c.req.query('platforms');
+  const platforms = platformsStr ? platformsStr.split(',').map(s => s.trim()) : undefined;
+
+  try {
+    const proxy = getProxy();
+    const ip = await getProxyExitIp();
+    const result = await getSocialProfiles(username, platforms);
+
+    c.header('X-Payment-Settled', 'true');
+    c.header('X-Payment-TxHash', payment.txHash);
+    return c.json({ ...result, meta: { proxy: { ip, country: proxy.country, type: 'mobile' } }, payment: { txHash: payment.txHash, network: payment.network, amount: verification.amount, settled: true } });
+  } catch (err: any) {
+    return c.json({ error: 'Social lookup failed', message: err?.message || String(err) }, 502);
+  }
+});
+
+// ─── AD SPY & CREATIVE INTELLIGENCE ───────────────────
+
+const ADSPY_PRICE_USDC = parseFloat(process.env.ADSPY_PRICE_USDC || '0.005');
+const ADSPY_DESCRIPTION = 'Ad Spy & Creative Intelligence — monitor competitor ads across Facebook Ad Library, Google Ads Transparency, TikTok Creative Center. Extract headlines, creatives, landing pages, ad formats.';
+
+serviceRouter.get('/adspy', async (c) => {
+  const walletAddress = process.env.WALLET_ADDRESS;
+  if (!walletAddress) return c.json({ error: 'Wallet not configured' }, 500);
+
+  const payment = extractPayment(c);
+  if (!payment) {
+    return c.json(build402Response('/api/adspy', ADSPY_DESCRIPTION, ADSPY_PRICE_USDC, walletAddress, {
+      input: { keyword: 'string (optional)', advertiser: 'string (optional)', platform: '"facebook" | "google" | "tiktok" (optional)' },
+      output: { results: 'AdCreative[]', platforms: 'string[]' },
+    }), 402);
+  }
+
+  const verification = await verifyPayment(payment, walletAddress, ADSPY_PRICE_USDC);
+  if (!verification.valid) return c.json({ error: 'Payment verification failed', reason: verification.error }, 402);
+
+  const keyword = c.req.query('keyword') || c.req.query('query') || undefined;
+  const advertiser = c.req.query('advertiser') || undefined;
+  const platform = c.req.query('platform') || undefined;
+
+  if (!keyword && !advertiser) {
+    return c.json({ error: 'Missing required parameter: keyword or advertiser', example: '/api/adspy?keyword=shoes&platform=facebook' }, 400);
+  }
+
+  try {
+    const proxy = getProxy();
+    const ip = await getProxyExitIp();
+    const result = await spyOnAds({ keyword, advertiser, platform });
+
+    c.header('X-Payment-Settled', 'true');
+    c.header('X-Payment-TxHash', payment.txHash);
+    return c.json({ ...result, meta: { proxy: { ip, country: proxy.country, type: 'mobile' } }, payment: { txHash: payment.txHash, network: payment.network, amount: verification.amount, settled: true } });
+  } catch (err: any) {
+    return c.json({ error: 'Ad spy failed', message: err?.message || String(err) }, 502);
   }
 });
