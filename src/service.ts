@@ -1815,7 +1815,7 @@ serviceRouter.get('/aisearch', async (c) => {
   const deep = c.req.query('deep') === 'true';
   try{
     const proxy = getProxy(); const ip = await getProxyExitIp();
-    const result = await aiSearch(q, deep, process.env.AI_SEARCH_API_KEY);
+    const result = await aiSearch(q, deep, process.env.AI_SEARCH_API_KEY || c.req.query('apikey') || undefined);
     c.header('X-Payment-Settled','true'); c.header('X-Payment-TxHash',p.txHash);
     return c.json({...result,meta:{proxy:{ip,country:proxy.country,type:'mobile'}},payment:{txHash:p.txHash,network:p.network,amount:v.amount,settled:true}});
   }catch(err:any){return c.json({error:'AI search failed',message:err?.message||String(err)},502);}
